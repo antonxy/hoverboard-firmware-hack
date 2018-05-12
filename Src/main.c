@@ -42,8 +42,19 @@ int cmd3;
 
 uint8_t button1, button2;
 
-int steer; // global variable for steering. -1000 to 1000
-int speed; // global variable for speed. -1000 to 1000
+int speedInR; // global variable for right speed. -1000 to 1000
+int speedInL; // global variable for left speed. -1000 to 1000
+
+uint8_t buttonLastL;
+uint8_t buttonLastR;
+
+int buttonCounterL;
+int buttonCounterR;
+
+uint8_t reverseBeep;
+
+uint16_t buttonFilteredL;
+uint16_t buttonFilteredR;
 
 extern volatile int pwml;  // global variable for pwm left. -1000 to 1000
 extern volatile int pwmr;  // global variable for pwm right. -1000 to 1000
@@ -145,7 +156,18 @@ int main(void) {
     LCD_WriteString(&lcd, "Initializing...");
   #endif
 
+	buttonLastL = 0;
+	buttonLastR = 0;
+
+	buttonCounterL = 0;
+	buttonCounterR = 0;
+
+	buttonFilteredL = 0;
+	buttonFilteredR = 0;
+
   enable = 1;
+
+	reverseBeep = 0;
 
   while(1) {
     HAL_Delay(5);
@@ -168,21 +190,50 @@ int main(void) {
     #endif
 
     #ifdef CONTROL_ADC
-      cmd1 = CLAMP(adc_buffer.l_rx2 - 700, 0, 2350) / 2.35; // ADC values range 0-4095, however full range of our poti only covers 650 - 3050
-      uint8_t button1 = (uint8_t)(adc_buffer.l_tx2 > 2000);
+      buttonFilteredL = 0.8 * buttonFilteredL + 0.2 * adc_buffer.l_rx2;
+      buttonFilteredR = 0.8 * buttonFilteredR + 0.2 * adc_buffer.l_tx2;
+      uint8_t buttonL = buttonFilteredL < 2000;
+      uint8_t buttonR = buttonFilteredR < 2000;
+
+			uint8_t buttonRisingL = (buttonL && !buttonLastL);
+			uint8_t buttonRisingR = (buttonR && !buttonLastR);
+
+			buttonLastL = buttonL;
+			buttonLastR = buttonR;
+
+			if (buttonRisingL) speedL += SPEED_UP_VALUE;
+			if (buttonRisingR) speedR += SPEED_UP_VALUE;
+
+			if (buttonL) buttonCounterL++;
+			else buttonCounterL = 0;
+
+			if (buttonR) buttonCounterR++;
+			else buttonCounterR = 0;
 
       timeout = 0;
     #endif
 
 
-    // ####### LOW-PASS FILTER #######
-    steer = steer * (1.0 - FILTER) + cmd1 * FILTER;
-    speed = speed * (1.0 - FILTER) + cmd2 * FILTER;
+    // ####### SLOW DOWN #######
+		int slow_down_val = 1;
+		if (speedR > 300 || speedL > 300) {
+			slow_down_val = 3;
+		}
+		if (speedR > slow_down_val) {
+			speedR -= slow_down_val;
+		} else {
+			speedR = 0;
+		}
+		if (speedL > slow_down_val) {
+			speedL -= slow_down_val;
+		} else {
+			speedL = 0;
+		}
 
 
     // ####### MIXER #######
-    speedR = CLAMP(speed * SPEED_COEFFICIENT -  steer * STEER_COEFFICIENT, -1000, 1000);
-    speedL = CLAMP(speed * SPEED_COEFFICIENT +  steer * STEER_COEFFICIENT, -1000, 1000);
+    speedR = CLAMP(speedR, 0, 1000);
+    speedL = CLAMP(speedL, 0, 1000);
 
     setScopeChannel(2, (int)speedR);
     setScopeChannel(3, (int)speedL);
@@ -191,11 +242,18 @@ int main(void) {
     ADDITIONAL_CODE;
     #endif
 
+		// STOP / REVERSE
+		if (buttonCounterL > 100 || buttonCounterR > 100) {
+			speedL = -400;
+			speedR = -400;
+			reverseBeep = 1;
+		} else {
+			reverseBeep = 0;
+		}
+
     // ####### SET OUTPUTS #######
-    if ((speedL < lastSpeedL + 50 && speedL > lastSpeedL - 50) && (speedR < lastSpeedR + 50 && speedR > lastSpeedR - 50) && timeout < TIMEOUT) {
-      pwmr = speedR;
-      pwml = -speedL;
-    }
+		pwmr = -speedR;
+		pwml = speedL;
 
     lastSpeedL = speedL;
     lastSpeedR = speedR;
@@ -231,7 +289,10 @@ int main(void) {
       }
       HAL_GPIO_WritePin(OFF_PORT, OFF_PIN, 0);
       while(1) {}
-    } else {
+    } else if (reverseBeep) {
+      buzzerFreq = 5;
+      buzzerPattern = 1;
+		} else {
       buzzerFreq = 0;
       buzzerPattern = 0;
     }
